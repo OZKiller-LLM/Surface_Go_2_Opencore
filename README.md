@@ -26,6 +26,20 @@ Brightness control
 
 Trackpad gesture
 
+# Graphics acceleration (Intel UHD 615, device-id 0x591C)
+The Pentium Gold 4425Y uses the same UHD 615 iGPU (`8086:591C`) as the Core m3-8100Y model, and macOS supports it natively through WhateverGreen. No device-id spoof or custom driver is needed.
+
+Acceleration depends on `DeviceProperties > Add > PciRoot(0x0)/Pci(0x2,0x0) > AAPL,ig-platform-id` being written in little-endian byte order:
+
+| Key | Type | Value |
+| --- | --- | --- |
+| AAPL,ig-platform-id | Data | `00001B59` (= 0x591B0000) |
+| framebuffer-patch-enable | Data | `01000000` |
+| framebuffer-stolenmem | Data | `00003001` |
+| framebuffer-fbmem | Data | `00009000` |
+
+Previously the value was `591B0000`, which is byte-reversed and reads as the invalid platform-id 0x00001B59. With that value the framebuffer never attaches, and macOS falls back to software rendering.
+
 # What is fixed and confirmed to be working
 Siri is working
 
