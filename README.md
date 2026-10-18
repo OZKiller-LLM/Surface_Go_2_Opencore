@@ -40,6 +40,19 @@ Acceleration depends on `DeviceProperties > Add > PciRoot(0x0)/Pci(0x2,0x0) > AA
 
 Previously the value was `591B0000`, which is byte-reversed and reads as the invalid platform-id 0x00001B59. With that value the framebuffer never attaches, and macOS falls back to software rendering.
 
+## CPUID spoof removed (Kernel > Emulate)
+Until now, this config spoofed the CPU as Ivy Bridge (`Cpuid1Data` `A0060300...`, CPUID 0x306A0) and set `DummyPowerManagement`. That setting came from the Surface Go 1 config this one is based on. The Pentium Gold 4425Y reports the same CPUID signature (0x806E9, Amber Lake Y) as the Core m3-8100Y, which Monterey supports natively. With the spoof, the kernel and Apple's Kaby Lake graphics stack run on a CPU they identify as Ivy Bridge, with XCPM and `X86PlatformPlugin` off. The working m3-8100Y config does not use a spoof. `Cpuid1Data` and `Cpuid1Mask` are now empty and `DummyPowerManagement` is `false`.
+
+If this no longer boots, restore the three values: `Cpuid1Data` = `oAYDAAAAAAAAAAAAAAAAAA==`, `Cpuid1Mask` = `/////wAAAAAAAAAAAAAAAA==`, `DummyPowerManagement` = `true`.
+
+## If the boot screen is still corrupted (red Apple logo, green progress bar)
+Try these one at a time and note the result of each:
+1. Add `-v` to `boot-args`, and photograph the last lines on screen if it hangs.
+2. If it reaches the desktop, run `system_profiler SPDisplaysDataType` and `log show --last boot --predicate 'eventMessage CONTAINS[c] "igfx" OR sender CONTAINS "AppleIntelKBL"'`.
+3. Increase DVMT pre-allocation to 64 MB (see jlempen's guide), then delete `framebuffer-patch-enable`, `framebuffer-stolenmem` and `framebuffer-fbmem`. The 9 MB `fbmem` value is smaller than a single 1920x1280 32-bit frame (9.375 MB).
+4. Try alternative platform-ids: `00001659` (0x59160000), `0000C087` (0x87C00000), or `05001C59` (0x591C0005, needs 64 MB DVMT).
+
+
 # What is fixed and confirmed to be working
 Siri is working
 
