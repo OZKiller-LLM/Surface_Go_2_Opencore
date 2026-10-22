@@ -43,10 +43,8 @@ Previously the value was `591B0000`, which is byte-reversed and reads as the inv
 ## Secure Boot
 `Misc > Security > SecureBootModel` is set to `Disabled`. With `Default` and `ApECID` = `0`, OpenCore builds the Secure Boot identity from `SystemUUID`. When that is blank or zero, boot stops with `OCB: Grabbed zero system-id for SB, this is not allowed`.
 
-## CPUID spoof removed (Kernel > Emulate)
-Until now, this config spoofed the CPU as Ivy Bridge (`Cpuid1Data` `A0060300...`, CPUID 0x306A0) and set `DummyPowerManagement`. That setting came from the Surface Go 1 config this one is based on. The Pentium Gold 4425Y reports the same CPUID signature (0x806E9, Amber Lake Y) as the Core m3-8100Y, which Monterey supports natively. With the spoof, the kernel and Apple's Kaby Lake graphics stack run on a CPU they identify as Ivy Bridge, with XCPM and `X86PlatformPlugin` off. The working m3-8100Y config does not use a spoof. `Cpuid1Data` and `Cpuid1Mask` are now empty and `DummyPowerManagement` is `false`.
-
-If this no longer boots, restore the three values: `Cpuid1Data` = `oAYDAAAAAAAAAAAAAAAAAA==`, `Cpuid1Mask` = `/////wAAAAAAAAAAAAAAAA==`, `DummyPowerManagement` = `true`.
+## CPUID spoof is required (Kernel > Emulate)
+The Ivy Bridge CPUID spoof (`Cpuid1Data` `A0060300...`, `Cpuid1Mask` `FFFFFFFF...`, `DummyPowerManagement` = `true`) must stay enabled on the Pentium Gold 4425Y. Without it, Monterey 12.7.6 hangs during boot, even with `-igfxvesa` or with CPUFriend disabled. The Core m3-8100Y model does not need the spoof.
 
 ## If the boot screen is still corrupted (red Apple logo, green progress bar)
 Try these one at a time and note the result of each:

@@ -768,11 +768,11 @@
             <key>Emulate</key>
             <dict>
                 <key>Cpuid1Data</key>
-                <data></data>
+                <data>oAYDAAAAAAAAAAAAAAAAAA==</data>
                 <key>Cpuid1Mask</key>
-                <data></data>
+                <data>/////wAAAAAAAAAAAAAAAA==</data>
                 <key>DummyPowerManagement</key>
-                <false/>
+                <true/>
                 <key>MaxKernel</key>
                 <string></string>
                 <key>MinKernel</key>
