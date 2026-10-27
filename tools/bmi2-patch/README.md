@@ -136,20 +136,35 @@ hardware and is next.
   which is routinely 40-45% of all bzhi cases. This is a bug in the
   emulator, not in anything shipped here.
 
-## Installing on the Surface Go 2 (not done yet -- needs the hardware)
+## Installing on the Surface Go 2
+
+A GUI installer that does steps 2-4 below for you is in
+`tools/gui-installer/` -- see that folder's README to build and run it.
+Manual steps:
 
 1. Boot to Recovery, `csrutil disable` (full SIP off) and
    `csrutil authenticated-root disable` (needed since any modification
    to `/System` content breaks the sealed volume's snapshot hash tree).
 2. Reboot to the desktop (with `-igfxvesa` in boot-args so it actually
-   reaches one), copy the two patched files over the originals:
+   reaches one), copy the two patched files to these paths (the live
+   system has no existing main executable there -- only `libigdmd.dylib`
+   is present, since Apple folds these into the dyld shared cache instead
+   of shipping a loose on-disk copy -- so this creates a new file rather
+   than overwriting one; the same thing OpenCore Legacy Patcher does for
+   this same class of driver bundle, see its `install_new_file()` /
+   `fix_permissions()` in `sys_patch/utilities/files.py`):
    - `.../AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver`
    - `.../AppleIntelKBLGraphicsMTLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsMTLDriver`
+
+   Then explicitly fix ownership and permissions on both (a bare `cp`
+   doesn't guarantee these; OCLP always does this after copying):
+   `chmod 755 <path>` and `chown root:wheel <path>`.
 3. Ad-hoc re-sign both (neither original extracted file carried its own
    code signature -- the dyld shared cache is signed as one unit, not
    per-dylib -- so this adds a fresh one rather than replacing anything):
    `codesign -f -s - <path>` on each.
-4. Rebuild the sealed snapshot: `bless --create-snapshot` (or whatever
-   the OCLP-style root-patch workflow on this system normally uses for
-   this step).
+4. Rebuild the sealed snapshot: `bless --mount / --create-snapshot` (if
+   that fails on your macOS version, mount the sealed system volume
+   explicitly, typically `/System/Volumes/Update/mnt1`, and bless that
+   instead).
 5. Remove `-igfxvesa` from boot-args and reboot.
