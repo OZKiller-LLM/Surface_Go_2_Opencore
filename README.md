@@ -64,7 +64,9 @@ Dependency com.xavier.BigSurface of kext com.xavier.BigSurfaceHIDDriver failed t
 
 `BigSurface` ships its own purpose-built battery driver for Surface hardware (`IOKitPersonalities`: "Surface Battery", "Surface Battery SMBus Controller", talking to the real Surface battery/SMBus controller via ACPI), with an internal helper class that happens to also be named `BatteryManager` -- the exact same internal class name the generic VirtualSMC plugin `SMCBatteryManager.kext` registers. Only one kext can own a given class name in the kernel; `SMCBatteryManager` loads first and wins, so `BigSurface` (and everything that depends on it) never loads at all.
 
-**Fix:** `SMCBatteryManager.kext` is now disabled (`Kernel > Add`). `BigSurface`'s own Surface-specific battery driver should take over the menu bar battery percentage, and `BigSurfaceHIDDriver` should now be free to load, which the atisDu notes above say provides Type Cover keyboard and trackpad support. Not yet confirmed on hardware -- if the menu bar battery icon disappears after this change, that's the one thing to watch for and report back.
+**Tried:** `SMCBatteryManager.kext` was disabled (`Kernel > Add`) so `BigSurface`'s own Surface-specific battery driver and `BigSurfaceHIDDriver` could load instead. **Reverted** -- on real hardware this removed the menu bar battery icon entirely and did not bring up the Type Cover (keyboard/trackpad). `SMCBatteryManager.kext` is back to enabled.
+
+The Type Cover on this particular unit did not work correctly in Windows either, so the leading theory is a hardware fault in the Cover itself (or its connector) rather than this kext conflict -- the `BatteryManager` class collision documented above is real and still worth knowing about if you have a known-good Cover, but it is likely not the root cause of this unit's issue.
 
 
 # What is fixed and confirmed to be working
