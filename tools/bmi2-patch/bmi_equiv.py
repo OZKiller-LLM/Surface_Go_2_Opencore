@@ -59,6 +59,31 @@ def _sized(reg64, bits):
     return reg64 if bits == 64 else GPR32[reg64]
 
 
+def _is_mem(operand):
+    """True if `operand` is a memory-operand expression (e.g.
+    'qword ptr [r10 + 0xd0]') rather than a bare register name. Capstone's
+    rendered operand text round-trips byte-identically through Keystone
+    (verified directly against real instructions from the driver binaries),
+    so it's used here as-is with no manual reconstruction. Safe to read
+    verbatim in every emit_* function below without excluding its base/index
+    registers from scratch selection: in each function the memory read is
+    always the FIRST instruction to touch any operand register (before rcx
+    or any scratch register is clobbered), so correctness holds regardless
+    of whether the memory operand's addressing registers happen to overlap
+    dst/cnt/scratch -- there is nothing to alias yet at the point it's read."""
+    return "[" in operand
+
+
+def _src_text(src, bits):
+    """Render a src operand (register name or memory-operand text) at the
+    right size. Memory text already carries its own size qualifier (Capstone
+    picks 'dword ptr' / 'qword ptr' to match the real instruction), so it is
+    used verbatim; only a plain register name gets resized."""
+    if _is_mem(src):
+        return src
+    return _sized(_r64(src), bits)
+
+
 def _restore_or_discard(pushed_reg64, dests, flag_safe=False):
     """pop <reg> to restore it, unless it aliases a destination register
     (in which case the stale saved copy is simply discarded).
@@ -81,15 +106,18 @@ _SHIFT_OP = {"shrx": "shr", "shlx": "shl", "sarx": "sar"}
 
 def emit_shiftx(mnemonic, dst, src, cnt, bits):
     op = _SHIFT_OP[mnemonic]
-    dst64, src64, cnt64 = _r64(dst), _r64(src), _r64(cnt)
-    # rcx is excluded too: it's used explicitly/unconditionally below for the
-    # shift count, so scratch must never land on it (else "push scratch" and
-    # the unconditional "push rcx" collide, and scratch gets overwritten by
-    # "mov rcx, cnt" before its captured src value is ever used).
-    (scratch,) = pick_scratch(1, [dst64, src64, cnt64, "rcx"])
+    dst64, cnt64 = _r64(dst), _r64(cnt)
+    # src may be a register name or memory-operand text (see _is_mem); only
+    # a register form needs to be kept out of the scratch pool -- a memory
+    # operand's own addressing registers need no such exclusion (see
+    # _is_mem's docstring for why).
+    exclude = [dst64, cnt64, "rcx"]
+    if not _is_mem(src):
+        exclude.append(_r64(src))
+    (scratch,) = pick_scratch(1, exclude)
     s = _sized(scratch, bits)
     d = _sized(dst64, bits)
-    srcv = _sized(src64, bits)
+    srcv = _src_text(src, bits)
 
     lines = [
         "pushfq",
@@ -199,12 +227,18 @@ def emit_bzhi(dst, src, idx, bits):
     then restore CF from the saved bit via `bt reg,0` into CF, in that
     exact order so TEST's flag writes land first and the CF fixup lands
     last."""
-    dst64, src64, idx64 = _r64(dst), _r64(src), _r64(idx)
+    # idx is always a register in BZHI's encoding (it's the VEX.vvvv field);
+    # only src (the ModRM operand) can be memory -- see _is_mem's docstring
+    # for why its addressing registers need no exclusion from the pool.
+    dst64, idx64 = _r64(dst), _r64(idx)
+    exclude = [dst64, idx64, "rcx"]
+    if not _is_mem(src):
+        exclude.append(_r64(src))
     # rcx excluded for the same reason as in emit_shiftx above: it's used
     # unconditionally for the shift count in the n<OperandSize branch.
-    s1, s2, s3 = pick_scratch(3, [dst64, src64, idx64, "rcx"])
+    s1, s2, s3 = pick_scratch(3, exclude)
     d = _sized(dst64, bits)
-    srcv = _sized(src64, bits)
+    srcv = _src_text(src, bits)
     r1 = _sized(s1, bits)
     r2 = _sized(s2, bits)
     cfsave = s3  # 64-bit, holds 0/1 for "n >= OperandSize"
@@ -215,9 +249,17 @@ def emit_bzhi(dst, src, idx, bits):
         f"push {s2}",
         f"push {s3}",
         "push rcx",
+        # src is read FIRST, before s1/idx touches anything: if src is a
+        # memory operand, its base/index registers must still hold their
+        # original values when this executes (that's the guarantee _is_mem's
+        # docstring relies on) -- reading idx into s1 before this would
+        # clobber s1 if it happens to alias one of src's addressing
+        # registers, corrupting the read (caught by the memory-operand
+        # fuzz tests; this ordering is why shiftx needs no such care while
+        # bzhi, which touches a scratch register for idx first, did).
+        f"mov {r2}, {srcv}",                  # r2 = src snapshot
         f"mov {r1}, {_sized(idx64, bits)}",
         f"and {_sized(s1, 32)}, 0xff",       # s1(low32) = n, upper bits of r1 cleared by 32-bit and
-        f"mov {r2}, {srcv}",                  # r2 = src snapshot
         f"xor {cfsave}, {cfsave}",
         f"cmp {r1}, {opsz}",
         f"setae {GPR8[cfsave]}",                # cfsave = 1 if n>=OperandSize else 0 (future CF)
@@ -240,5 +282,75 @@ def emit_bzhi(dst, src, idx, bits):
         _restore_or_discard(s3, [dst64], flag_safe=True),
         _restore_or_discard(s2, [dst64], flag_safe=True),
         _restore_or_discard(s1, [dst64], flag_safe=True),
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# PDEP  --  dst = bits of src deposited into the positions marked by mask's
+# set bits (all other dst bits 0). Operand order verified empirically with
+# Unicorn: `pdep dst, src, mask` (src=VEX.vvvv, always a register; mask is
+# the ModRM operand and CAN be memory, though neither real driver binary
+# uses that form). No flags written -> preserve RFLAGS like shrx/rorx/mulx.
+#
+# Classic isolate-lowest-set-bit algorithm (same one compiler-rt's software
+# __pdep fallback uses), which runs popcount(mask) iterations rather than a
+# fixed 64:
+#   result = 0; s = src; m = mask
+#   while (m) { lsb = m & -m; if (s & 1) result |= lsb; s >>= 1; m &= m-1; }
+# ---------------------------------------------------------------------------
+def emit_pdep(dst, src, mask, bits):
+    dst64 = _r64(dst)
+    exclude = [dst64]
+    if not _is_mem(src):
+        exclude.append(_r64(src))
+    if not _is_mem(mask):
+        exclude.append(_r64(mask))
+    acc, s, m, lsb = pick_scratch(4, exclude)
+    d = _sized(dst64, bits)
+    acc_s, s_s, m_s, lsb_s = (_sized(r, bits) for r in (acc, s, m, lsb))
+    src_text = _src_text(src, bits)
+    mask_text = _src_text(mask, bits)
+
+    loop_lbl = _fresh_label("pdep_loop")
+    done_lbl = _fresh_label("pdep_done")
+    skip_or_lbl = _fresh_label("pdep_skip_or")
+
+    lines = [
+        "pushfq",
+        f"push {acc}",
+        f"push {s}",
+        f"push {m}",
+        f"push {lsb}",
+        # mask (the only operand of the two that PDEP's encoding allows to be
+        # memory -- src is always VEX.vvvv, always a register) is read FIRST,
+        # before any scratch register is written, for the same reason BZHI's
+        # src read was moved first: a later read's addressing registers must
+        # not have already been clobbered by an earlier scratch write.
+        f"mov {m_s}, {mask_text}",
+        f"mov {s_s}, {src_text}",
+        f"xor {acc_s}, {acc_s}",
+        f"{loop_lbl}:",
+        f"test {m_s}, {m_s}",
+        f"jz {done_lbl}",
+        f"mov {lsb_s}, {m_s}",
+        f"neg {lsb_s}",
+        f"and {lsb_s}, {m_s}",         # lsb = m & -m (lowest set bit of m)
+        f"shr {s_s}, 1",                # CF = bit about to be tested; s >>= 1
+        f"jnc {skip_or_lbl}",
+        f"or {acc_s}, {lsb_s}",
+        f"{skip_or_lbl}:",
+        f"mov {lsb_s}, {m_s}",
+        f"sub {lsb_s}, 1",
+        f"and {m_s}, {lsb_s}",          # m &= m-1 (clear lowest set bit)
+        f"jmp {loop_lbl}",
+        f"{done_lbl}:",
+        f"mov {d}, {acc_s}",            # final result -- written before any pop,
+        # so a pop that aliases dst (handled via discard below) can't clobber it
+        _restore_or_discard(lsb, [dst64]),
+        _restore_or_discard(m, [dst64]),
+        _restore_or_discard(s, [dst64]),
+        _restore_or_discard(acc, [dst64]),
+        "popfq",
     ]
     return "\n".join(lines)

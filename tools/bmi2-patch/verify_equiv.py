@@ -27,12 +27,20 @@ CODE_BASE = 0x400000
 STACK_BASE = 0x700000
 STACK_SIZE = 0x4000
 CODE_SIZE = 0x4000
+DATA_BASE = 0x600000
+DATA_SIZE = 0x2000
 
 
-def run(asm_text, init_regs, enable_bmi2):
+def run(asm_text, init_regs, enable_bmi2, data_bytes=None):
+    """data_bytes, if given, is written at DATA_BASE before execution --
+    used by the memory-operand tests (shrx/shlx/sarx/bzhi with a `[reg+disp]`
+    src) to back the memory read with known content."""
     mu = u.Uc(u.UC_ARCH_X86, u.UC_MODE_64)
     mu.mem_map(CODE_BASE, CODE_SIZE)
     mu.mem_map(STACK_BASE, STACK_SIZE)
+    if data_bytes is not None:
+        mu.mem_map(DATA_BASE, DATA_SIZE)
+        mu.mem_write(DATA_BASE, data_bytes)
 
     if enable_bmi2:
         encoding, _ = ks64.asm(asm_text, CODE_BASE)
@@ -283,6 +291,167 @@ def test_bzhi(trials=3000):
     return fail == 0
 
 
+def _mem_operand_case(bits, regs_needed=2):
+    """Pick a (base[, index]), displacement, and matching data-region offset
+    for a `[base]`, `[base+disp]` or `[base+index+disp]` memory operand, with
+    the backing data placed so the computed effective address always lands
+    inside the mapped DATA region regardless of the (possibly negative) disp
+    chosen. Mirrors the forms actually seen in the real driver binaries
+    (e.g. '[r10 + 0xd0]', '[r14 + r12 + 0x28]', '[r15 + rcx]')."""
+    use_index = regs_needed == 3 and random.random() < 0.5
+    size_kw = "qword ptr" if bits == 64 else "dword ptr"
+    disp = random.choice([0, 8, -0x88, 0x120, 0x1c0])
+    data_offset = 0x1000  # fixed, far from both ends of DATA_SIZE
+    if use_index:
+        base, index = random.sample(ALL_REGS, 2)
+        index_val = random.choice([0, 1, 8])  # kept small; scale is always 1 here
+        text = f"{size_kw} [{base} + {index}{(' + ' + str(disp)) if disp else ''}]" if disp >= 0 \
+            else f"{size_kw} [{base} + {index} - {-disp}]"
+        extra_regs = {base: DATA_BASE + data_offset - disp - index_val, index: index_val}
+    else:
+        base = random.choice(ALL_REGS)
+        text = f"{size_kw} [{base}{(' + ' + str(disp)) if disp else ''}]" if disp >= 0 \
+            else f"{size_kw} [{base} - {-disp}]"
+        extra_regs = {base: DATA_BASE + data_offset - disp}
+    return text, extra_regs, data_offset, (base,) + ((index,) if use_index else ())
+
+
+def test_shiftx_mem(trials=1500):
+    ok = fail = 0
+    for mnem in ("shrx", "shlx", "sarx"):
+        for bits in (32, 64):
+            for _ in range(trials // 6):
+                others = random.sample(ALL_REGS, 2)  # dst, cnt (base/index picked separately, may overlap-free by luck but checked below)
+                dst, cnt = others
+                src_text, extra_regs, data_offset, mem_regs = _mem_operand_case(bits, regs_needed=random.choice([2, 3]))
+                if dst in mem_regs or cnt in mem_regs:
+                    continue  # keep operand roles distinct for a clean test
+                before = {r: rand_val(64) for r in ALL_REGS}
+                before["_flags"] = random.choice([0x202, 0x246, 0x293, 0x0])
+                cnt_val = random.choice([0, 1, bits - 1, bits, bits + 5, rand_val(6)])
+                before[cnt] = cnt_val
+                before.update(extra_regs)
+                mem_val = rand_val(64)
+                data = bytearray(DATA_SIZE)
+                data[data_offset:data_offset + 8] = mem_val.to_bytes(8, "little")
+
+                dst_r = dst if bits == 64 else be.GPR32[dst]
+                cnt_r = cnt if bits == 64 else be.GPR32[cnt]
+                orig_asm = f"{mnem} {dst_r}, {src_text}, {cnt_r}"
+                orig_out = run(orig_asm, before, True, data_bytes=bytes(data))
+
+                legacy_asm = be.emit_shiftx(mnem, dst, src_text, cnt, bits)
+                legacy_out = run(legacy_asm, before, False, data_bytes=bytes(data))
+
+                label = f"{mnem}{bits}-mem dst={dst} src=[{src_text}] cnt={cnt} cntval={cnt_val}"
+                if check_equal(label, before, orig_out, legacy_out, [dst], bits, flags_defined=False):
+                    ok += 1
+                else:
+                    fail += 1
+    print(f"shiftx-mem: {ok} ok, {fail} fail")
+    return fail == 0
+
+
+def test_bzhi_mem(trials=1500):
+    ok = fail = 0
+    unicorn_bzhi_bugs = 0
+    for bits in (32, 64):
+        for _ in range(trials // 2):
+            dst, idx = random.sample(ALL_REGS, 2)
+            src_text, extra_regs, data_offset, mem_regs = _mem_operand_case(bits, regs_needed=random.choice([2, 3]))
+            if dst in mem_regs or idx in mem_regs:
+                continue
+            before = {r: rand_val(64) for r in ALL_REGS}
+            before["_flags"] = random.choice([0x202, 0x246, 0x293, 0x0])
+            n = random.choice([0, 1, bits - 1, bits, bits + 1, 255, rand_val(8)])
+            before[idx] = (before[idx] & ~0xFF) | n
+            before.update(extra_regs)
+            mem_val = rand_val(64)
+            data = bytearray(DATA_SIZE)
+            data[data_offset:data_offset + 8] = mem_val.to_bytes(8, "little")
+
+            dst_r = dst if bits == 64 else be.GPR32[dst]
+            idx_r = idx if bits == 64 else be.GPR32[idx]
+            orig_asm = f"bzhi {dst_r}, {src_text}, {idx_r}"
+            orig_out = run(orig_asm, before, True, data_bytes=bytes(data))
+
+            legacy_asm = be.emit_bzhi(dst, src_text, idx, bits)
+            legacy_out = run(legacy_asm, before, False, data_bytes=bytes(data))
+
+            src_val = mem_val & mask(bits)
+            ref_result, ref_cf, ref_zf = bzhi_reference(src_val, before[idx], bits)
+
+            orig_val = orig_out[be._r64(dst)] & mask(bits)
+            orig_cf = orig_out["_flags"] & 1
+            if orig_val != ref_result or orig_cf != ref_cf:
+                unicorn_bzhi_bugs += 1
+
+            legacy_val = legacy_out[be._r64(dst)] & mask(bits)
+            legacy_cf = legacy_out["_flags"] & 1
+            legacy_zf = (legacy_out["_flags"] >> 6) & 1
+            label = f"bzhi{bits}-mem dst={dst} src=[{src_text}] idx={idx} n={n}"
+            problems = []
+            if legacy_val != ref_result:
+                problems.append(f"result: ref=0x{ref_result:x} legacy=0x{legacy_val:x}")
+            if legacy_cf != ref_cf:
+                problems.append(f"CF: ref={ref_cf} legacy={legacy_cf}")
+            if legacy_zf != ref_zf:
+                problems.append(f"ZF: ref={ref_zf} legacy={legacy_zf}")
+            for r in ALL_REGS:
+                if r == be._r64(dst):
+                    continue
+                if legacy_out[r] != before.get(r, 0):
+                    problems.append(f"leak into {r}: before=0x{before.get(r,0):x} after=0x{legacy_out[r]:x}")
+            if problems:
+                print(f"FAIL [{label}]: " + "; ".join(problems))
+                fail += 1
+            else:
+                ok += 1
+    print(f"bzhi-mem: {ok} ok, {fail} fail (Unicorn's own bzhi disagreed with spec in "
+          f"{unicorn_bzhi_bugs} of {ok+fail} cases)")
+    return fail == 0
+
+
+def test_pdep(trials=2000):
+    ok = fail = 0
+    for bits in (32, 64):
+        for _ in range(trials // 2):
+            dst, src, maskr = random.sample(ALL_REGS, 3)
+            before = {r: rand_val(64) for r in ALL_REGS}
+            before["_flags"] = random.choice([0x202, 0x246, 0x293, 0x0])
+            # exercise a spread of popcounts, including 0 and all-bits-set
+            m = bits // 1  # placeholder, replaced below
+            bitmask_full = (1 << bits) - 1
+            weight_choice = random.choice([0, 1, bits // 2, bits, "random"])
+            if weight_choice == "random":
+                m = rand_val(bits)
+            else:
+                # build a mask with roughly `weight_choice` random bits set
+                bits_list = list(range(bits))
+                random.shuffle(bits_list)
+                m = 0
+                for b in bits_list[:weight_choice]:
+                    m |= (1 << b)
+            before[maskr] = (before[maskr] & ~bitmask_full) | m
+
+            dst_r = dst if bits == 64 else be.GPR32[dst]
+            src_r = src if bits == 64 else be.GPR32[src]
+            mask_r = maskr if bits == 64 else be.GPR32[maskr]
+            orig_asm = f"pdep {dst_r}, {src_r}, {mask_r}"
+            orig_out = run(orig_asm, before, True)
+
+            legacy_asm = be.emit_pdep(dst, src, maskr, bits)
+            legacy_out = run(legacy_asm, before, False)
+
+            label = f"pdep{bits} dst={dst} src={src} mask={maskr} popcount={bin(m).count('1')}"
+            if check_equal(label, before, orig_out, legacy_out, [dst], bits, flags_defined=False):
+                ok += 1
+            else:
+                fail += 1
+    print(f"pdep: {ok} ok, {fail} fail")
+    return fail == 0
+
+
 if __name__ == "__main__":
     random.seed(1234567)
     results = []
@@ -290,6 +459,9 @@ if __name__ == "__main__":
     results.append(("rorx", test_rorx()))
     results.append(("mulx", test_mulx()))
     results.append(("bzhi", test_bzhi()))
+    results.append(("shiftx-mem", test_shiftx_mem()))
+    results.append(("bzhi-mem", test_bzhi_mem()))
+    results.append(("pdep", test_pdep()))
     print()
     all_ok = True
     for name, ok in results:
