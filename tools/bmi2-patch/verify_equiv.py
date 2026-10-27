@@ -208,6 +208,36 @@ def test_mulx(trials=2000):
     return fail == 0
 
 
+def test_mulx_aliased_dest(trials=1000):
+    """dst_high == dst_low -- a real aliasing case the driver binaries
+    actually contain (`mulx r, r, src`), never exercised by test_mulx's
+    random.sample(..., 3), which always picks 3 DISTINCT registers. Found
+    via real-binary verification: HIGH must win (be written last) when the
+    two destinations alias, confirmed against Unicorn directly."""
+    ok = fail = 0
+    for bits in (32, 64):
+        for _ in range(trials // 2):
+            d, src = random.sample(ALL_REGS, 2)
+            before = {r: rand_val(64) for r in ALL_REGS}
+            before["_flags"] = random.choice([0x202, 0x246, 0x293, 0x0])
+
+            d_r = d if bits == 64 else be.GPR32[d]
+            src_r = src if bits == 64 else be.GPR32[src]
+            orig_asm = f"mulx {d_r}, {d_r}, {src_r}"
+            orig_out = run(orig_asm, before, True)
+
+            legacy_asm = be.emit_mulx(d, d, src, bits)
+            legacy_out = run(legacy_asm, before, False)
+
+            label = f"mulx{bits}-aliased d={d} src={src} rdx={before['rdx']:#x}"
+            if check_equal(label, before, orig_out, legacy_out, [d], bits, flags_defined=False):
+                ok += 1
+            else:
+                fail += 1
+    print(f"mulx-aliased-dest: {ok} ok, {fail} fail")
+    return fail == 0
+
+
 def bzhi_reference(src, idx, bits):
     """Pure-Python BZHI per the Intel SDM definition -- used as ground
     truth INSTEAD OF Unicorn's own `bzhi` emulation for this one
@@ -458,6 +488,7 @@ if __name__ == "__main__":
     results.append(("shiftx", test_shiftx()))
     results.append(("rorx", test_rorx()))
     results.append(("mulx", test_mulx()))
+    results.append(("mulx-aliased-dest", test_mulx_aliased_dest()))
     results.append(("bzhi", test_bzhi()))
     results.append(("shiftx-mem", test_shiftx_mem()))
     results.append(("bzhi-mem", test_bzhi_mem()))

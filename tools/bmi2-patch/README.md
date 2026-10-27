@@ -5,75 +5,151 @@
 The Pentium Gold 4425Y's CPU lacks BMI1/BMI2/AVX/AVX2 (Intel disables the
 VEX instruction encoding on Pentium/Celeron SKUs, even though the silicon
 is otherwise Kaby Lake). Apple's Kaby Lake graphics drivers for macOS
-Monterey (`AppleIntelKBLGraphicsMTLDriver`, `AppleIntelKBLGraphicsGLDriver`,
-and their `libigdmd.dylib` companions) use BMI2 instructions in hot paths.
-On this CPU, WindowServer crashes with `EXC_BAD_INSTRUCTION / SIGILL` the
-moment it loads them, which is why the Surface Go 2 (4425Y) shows a
-corrupted red-logo/green-bar boot screen: the kernel-side framebuffer
-driver works fine, but the user-space Metal/OpenGL driver never starts.
+Monterey (`AppleIntelKBLGraphicsMTLDriver`, `AppleIntelKBLGraphicsGLDriver`)
+use BMI2 instructions in hot paths. On this CPU, WindowServer crashes with
+`EXC_BAD_INSTRUCTION / SIGILL` the moment it loads them (confirmed via a
+real `WindowServer-*.ips` crash report, decoded to a `SHRX` instruction
+inside `AppleIntelKBLGraphicsMTLDriver`), which is why the Surface Go 2
+(4425Y) shows a corrupted red-logo/green-bar boot screen: the kernel-side
+framebuffer driver works fine, but the user-space Metal/OpenGL driver
+never starts.
 
-The fix is to patch the driver binaries themselves: find every BMI1/BMI2
+The fix: patch the driver binaries themselves. Find every BMI1/BMI2
 instruction and replace it with a short detour to an equivalent sequence
 built only from baseline (pre-BMI2) x86-64 instructions, which the 4425Y
 does support.
 
+## Status: patch built and verified against the real binaries -- not yet installed/booted
+
+Both real driver binaries, extracted from the user's own Mac running
+Monterey 12.7.6, have been fully patched and verified:
+
+| File | BMI2 sites | Patched | Verified |
+|---|---|---|---|
+| `AppleIntelKBLGraphicsGLDriver` | 241 | 241 | 241/241, 0 failures |
+| `AppleIntelKBLGraphicsMTLDriver` | 682 (incl. the exact site that crashed) | 682 | 682/682, 0 failures |
+| `libigdmd.dylib` (both bundles) | 0 | n/a | n/a -- no BMI2 instructions found, not patched |
+
+Verification means: for every single patched site, the ACTUAL trampoline
+bytes written into the patched file (not a freshly-regenerated copy) were
+executed in the Unicorn CPU emulator against realistic/randomized inputs
+(spot-checked sites and every `pdep`/RIP-relative site got 40 trials each)
+and their results compared bit-for-bit against the real, unmodified VEX
+instruction. ~3,500 real executions total, 0 mismatches as of the last run.
+`classify.py`/`scan_sites.py` also confirm zero BMI2 instructions remain in
+either patched file's `__TEXT,__text` section afterward.
+
+What's genuinely NOT done: installing the patched files on the Surface Go
+2 and confirming it boots with acceleration. That step needs the real
+hardware and is next.
+
 ## What's in this directory
 
 - **`bmi_equiv.py`** -- for each BMI instruction form found in the drivers
-  (`shrx`/`shlx`/`sarx`, `rorx`, `mulx`, `bzhi`), generates a legacy
-  equivalent instruction sequence (assembly text) given the instruction's
-  concrete operand registers. Handles register aliasing (e.g. destination
-  aliasing a scratch or implicit register), flag preservation where the
-  VEX form doesn't define flag outputs, and correct flag computation where
-  it does (BZHI).
+  (`shrx`/`shlx`/`sarx`, `rorx`, `mulx`, `bzhi`, `pdep`), generates a legacy
+  equivalent instruction sequence given the instruction's concrete operand
+  registers (or a memory operand, for the ~90 real sites that use one).
+  Handles register aliasing (destination aliasing a scratch, an implicit
+  register, or -- for `mulx` -- the OTHER destination), flag preservation
+  where the VEX form doesn't define flag outputs, and correct flag
+  computation where it does (`bzhi`).
 - **`verify_equiv.py`** -- proves each generated sequence is bit-identical
-  to the real VEX instruction it replaces, by executing both in the
-  Unicorn CPU emulator against thousands of randomized inputs (including
-  every register-aliasing combination and boundary values like count=0,
-  count=OperandSize-1/-1, count overflow, idx=0/OperandSize/255). Run it
-  with:
-  ```
-  python3 verify_equiv.py
-  ```
-  As of this commit it passes ~11,000 trials across all four instruction
-  families with zero failures.
+  to the real VEX instruction via Unicorn, across ~15,500 randomized
+  trials covering every instruction form actually present in the two real
+  binaries (including memory operands and the `mulx`-aliased-destination
+  case). Run with `python3 verify_equiv.py`.
+- **`scan_sites.py`** -- disassembles a Mach-O binary's `__TEXT,__text`
+  with Capstone, finds every VEX-encoded BMI1/BMI2 site, and extracts full
+  structured operand info (registers, memory operand text and its
+  base/index/scale/disp, RIP-relative detection and resolved absolute
+  target) ready to feed into `bmi_equiv.py`.
+- **`patch_macho.py`** -- the actual binary patcher. For each site found
+  by `scan_sites.py`: builds its trampoline's assembly text, assembles all
+  trampolines sequentially into a new code blob, patches each site to a
+  5-byte relative `jmp` into its trampoline (every real site is >=5 bytes,
+  so this always fits in place without disturbing surrounding
+  instructions), and appends the trampoline blob as a new `__BMI2FIX`
+  segment at the end of the file -- its `LC_SEGMENT_64` command is written
+  into the existing unused padding between the Mach-O header's load
+  commands and the first section's file data (both real binaries have
+  several KB of it), so no existing file content ever needs to shift.
+  Usage: `python3 patch_macho.py <input> <output>`.
+- **`verify_patched_file.py`** -- the strongest check in this project:
+  takes an original file and its patched output, and for every site
+  re-derives the trampoline's real address from the actual `E9`/rel32
+  bytes written at that site, pulls out the actual trampoline bytes that
+  shipped in the file, and runs them in Unicorn against the real
+  unpatched instruction with matching inputs. Usage:
+  `python3 verify_patched_file.py <original> <patched>`.
 
-## Status
+## Bugs found and fixed along the way (most interesting first)
 
-This is the **codegen and correctness-proof stage**, done without needing
-the actual driver binaries or BMI2-capable hardware -- correctness is
-proven by emulation against the real VEX instructions, which Unicorn does
-support executing (even though the target CPU can't). What's not done yet:
+- **`_riprel_wrapper`'s register exclusion missed `bzhi`'s `idx` entirely.**
+  The one RIP-relative site in the whole project is a `bzhi` with
+  `idx=rax`. The wrapper that loads a RIP-relative operand's resolved
+  absolute address into a scratch register only excluded `dst`/`cnt`/`rcx`
+  from that scratch's candidate pool -- `cnt` is shiftx's role-register,
+  but bzhi's is `idx`, which nothing excluded. The scratch landed on `rax`
+  too, so its own preamble silently overwrote the real `idx` value with
+  the just-loaded `src` value before bzhi's generator ever read it,
+  corrupting CF and the result whenever `idx` was meant to select "keep
+  all bits". Caught only by `verify_patched_file.py` against the real
+  site -- there's exactly one RIP-relative instruction in either binary,
+  so no generic fuzz test ever exercised this path. Now excludes every
+  named register-valued role the site has, not just the ones the
+  original code's author happened to think of.
+- **`mulx` with `dst_high == dst_low` aliased.** The compiler does emit
+  `mulx r, r, src` in these binaries (confirmed: several real sites).
+  Real hardware/Unicorn writes HIGH last when the two destinations alias
+  (HIGH wins), but the generator wrote LOW last. `verify_equiv.py`'s
+  original `mulx` test always sampled 3 *distinct* registers for
+  dst_high/dst_low/src, so it never hit this case -- closed with a
+  dedicated `test_mulx_aliased_dest` in addition to the generator fix.
+- **Unicorn/QEMU engine bug: two mapped regions both near the top of the
+  48-bit canonical address space corrupt execute permissions on the
+  second one**, even though `mem_read`/`mem_write` on it work fine (a
+  real trampoline's vmaddr and the real `__text` resume address it jumps
+  back to are both such addresses, since both come from the original
+  dyld shared cache's layout). Confirmed via a minimal repro independent
+  of this project's own code. Worked around in `verify_patched_file.py`
+  by redirecting a local copy's trailing jmp to a sentinel within the
+  trampoline's own already-mapped page for execution purposes only --
+  the real jmp's byte-correctness is checked separately, by decoding the
+  site's own `E9`/rel32 bytes directly.
+- **A Mach-O patching mistake that would have corrupted the whole file**:
+  an early version inserted the new `LC_SEGMENT_64` command into the
+  header's unused padding with a bytearray *insert*, which grows the
+  array and silently shifts every byte after it -- including the jmp
+  patches already written into `__text` and the entire rest of the file.
+  Fixed to *overwrite* the padding in place (same length in, same length
+  out). Caught immediately by `verify_patched_file.py` reading back
+  garbage at every site's expected jmp location.
+- **Unicorn/QEMU's own 32-bit `bzhi` TCG emulation is independently
+  buggy**: for index values `n >= 32` it incorrectly clears bit 31 of the
+  result, though the instruction is specified to leave the source
+  unchanged in that case (CF is also wrong at some `n == OperandSize - 1`
+  boundaries). Both `verify_equiv.py` and `verify_patched_file.py` check
+  `bzhi` sites against an independent, hand-written Python reference
+  model of the Intel SDM's definition instead of trusting Unicorn's own
+  instruction as ground truth -- and separately count (without failing
+  the suite) how often Unicorn's own output disagrees with the spec,
+  which is routinely 40-45% of all bzhi cases. This is a bug in the
+  emulator, not in anything shipped here.
 
-1. **Extracting the real driver binaries** from a Mac running macOS
-   Monterey 12.7.6 (any Intel Mac with Kaby Lake or later graphics ships
-   identical copies of these files -- they live inside the dyld shared
-   cache, not as plain files on disk, so they need a cache-extraction
-   tool; see the project README/chat history for the extraction steps).
-2. **The actual binary patcher** -- locating every BMI2 instruction site
-   in the real Mach-O binaries (via Capstone disassembly, as was already
-   done against the Skylake driver from `PatcherSupportPkg` as a stand-in
-   to classify instruction forms), appending trampoline code generated by
-   `bmi_equiv.py` in new space, and rewriting each site to a 5-byte
-   relative `jmp` into its trampoline (all instruction forms found are
-   >=5 bytes, so this always fits in place; RIP-relative memory operands,
-   rare in these binaries, need their displacement recomputed for the
-   trampoline's address).
-3. **Installing the patched binaries** on the Surface Go 2's macOS volume
-   (SIP off, `csrutil authenticated-root disable`, replace the bundles,
-   re-seal the snapshot) and testing.
+## Installing on the Surface Go 2 (not done yet -- needs the hardware)
 
-## A known third-party bug found along the way
-
-While building the BZHI verifier, Unicorn/QEMU's own TCG emulation of the
-32-bit `bzhi` instruction was found to be buggy: for index values
-`n >= 32` it incorrectly clears bit 31 of the result, even though the
-instruction is specified to leave the source unchanged in that case. (CF
-is also wrong at the `n == OperandSize - 1` boundary in some cases.)
-`verify_equiv.py` works around this by checking the legacy BZHI sequence
-against an independent, hand-written Python reference model of the Intel
-SDM's BZHI definition instead of trusting Unicorn's own instruction as
-ground truth -- and separately counts (without failing the suite) how
-often Unicorn's own output disagrees with the spec, which was 1281/3000
-cases in the last run. This is a bug in the emulator, not in anything
-shipped here.
+1. Boot to Recovery, `csrutil disable` (full SIP off) and
+   `csrutil authenticated-root disable` (needed since any modification
+   to `/System` content breaks the sealed volume's snapshot hash tree).
+2. Reboot to the desktop (with `-igfxvesa` in boot-args so it actually
+   reaches one), copy the two patched files over the originals:
+   - `.../AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver`
+   - `.../AppleIntelKBLGraphicsMTLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsMTLDriver`
+3. Ad-hoc re-sign both (neither original extracted file carried its own
+   code signature -- the dyld shared cache is signed as one unit, not
+   per-dylib -- so this adds a fresh one rather than replacing anything):
+   `codesign -f -s - <path>` on each.
+4. Rebuild the sealed snapshot: `bless --create-snapshot` (or whatever
+   the OCLP-style root-patch workflow on this system normally uses for
+   this step).
+5. Remove `-igfxvesa` from boot-args and reboot.

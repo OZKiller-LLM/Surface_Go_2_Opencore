@@ -187,8 +187,15 @@ def emit_mulx(dst_high, dst_low, src, bits):
         f"mul {ds1}",                 # rdx:rax = rax * s1(=src)
         f"mov {ds2}, {_sized('rdx', bits)}",   # stash HIGH result
         f"mov {ds1}, {_sized('rax', bits)}",   # stash LOW result (s1 free again)
-        f"mov {_sized(dhi64, bits)}, {ds2}",   # dst_high <- HIGH
+        # LOW written first, HIGH last: when dst_high and dst_low alias the
+        # same register (confirmed via Unicorn that real hardware allows
+        # this and the SECOND write wins), the result must be HIGH, not
+        # LOW -- caught by testing against the actual driver binaries,
+        # where the compiler does generate `mulx r, r, src` sites; the
+        # earlier generic fuzz testing always sampled 3 DISTINCT registers
+        # for dlo/dhi/src and so never exercised this aliasing case.
         f"mov {_sized(dlo64, bits)}, {ds1}",   # dst_low  <- LOW
+        f"mov {_sized(dhi64, bits)}, {ds2}",   # dst_high <- HIGH (wins if aliased)
         _restore_or_discard(s2, [dlo64, dhi64]),
         _restore_or_discard(s1, [dlo64, dhi64]),
         _restore_or_discard("rdx", [dlo64, dhi64]),
