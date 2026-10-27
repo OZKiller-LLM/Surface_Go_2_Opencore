@@ -681,9 +681,9 @@
                     <key>BundlePath</key>
                     <string>SMCBatteryManager.kext</string>
                     <key>Comment</key>
-                    <string>V1.3.7 | SMCBatteryManager.kext</string>
+                    <string>V1.3.7 | SMCBatteryManager.kext -- disabled, conflicts with BigSurface's own battery driver, see README</string>
                     <key>Enabled</key>
-                    <true/>
+                    <false/>
                     <key>ExecutablePath</key>
                     <string>Contents/MacOS/SMCBatteryManager</string>
                     <key>MaxKernel</key>

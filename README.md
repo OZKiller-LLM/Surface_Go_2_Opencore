@@ -53,6 +53,19 @@ Try these one at a time and note the result of each:
 3. Increase DVMT pre-allocation to 64 MB (see jlempen's guide), then delete `framebuffer-patch-enable`, `framebuffer-stolenmem` and `framebuffer-fbmem`. The 9 MB `fbmem` value is smaller than a single 1920x1280 32-bit frame (9.375 MB).
 4. Try alternative platform-ids: `00001659` (0x59160000), `0000C087` (0x87C00000), or `05001C59` (0x591C0005, needs 64 MB DVMT).
 
+## Type Cover (keyboard/trackpad) and battery -- BigSurface failed to load
+A verbose boot log showed `BigSurface` failing to load entirely:
+```
+OSMetaClass: Kext com.xavier.BigSurface class BatteryManager is a duplicate; kext ru.usrsse2.SMCBatteryManager already has a class by that name.
+Kext com.xavier.BigSurface failed to load (0xdc000817).
+Dependency com.xavier.BigSurface of kext com.xavier.BigSurfaceHIDDriver failed to load.
+```
+`BigSurfaceHIDDriver` (the Type Cover's actual keyboard/trackpad HID driver) depends on `BigSurface`, so this one conflict silently broke both -- not just the battery.
+
+`BigSurface` ships its own purpose-built battery driver for Surface hardware (`IOKitPersonalities`: "Surface Battery", "Surface Battery SMBus Controller", talking to the real Surface battery/SMBus controller via ACPI), with an internal helper class that happens to also be named `BatteryManager` -- the exact same internal class name the generic VirtualSMC plugin `SMCBatteryManager.kext` registers. Only one kext can own a given class name in the kernel; `SMCBatteryManager` loads first and wins, so `BigSurface` (and everything that depends on it) never loads at all.
+
+**Fix:** `SMCBatteryManager.kext` is now disabled (`Kernel > Add`). `BigSurface`'s own Surface-specific battery driver should take over the menu bar battery percentage, and `BigSurfaceHIDDriver` should now be free to load, which the atisDu notes above say provides Type Cover keyboard and trackpad support. Not yet confirmed on hardware -- if the menu bar battery icon disappears after this change, that's the one thing to watch for and report back.
+
 
 # What is fixed and confirmed to be working
 Siri is working
