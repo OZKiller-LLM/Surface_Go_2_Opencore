@@ -53,6 +53,43 @@ Try these one at a time and note the result of each:
 3. Increase DVMT pre-allocation to 64 MB (see jlempen's guide), then delete `framebuffer-patch-enable`, `framebuffer-stolenmem` and `framebuffer-fbmem`. The 9 MB `fbmem` value is smaller than a single 1920x1280 32-bit frame (9.375 MB).
 4. Try alternative platform-ids: `00001659` (0x59160000), `0000C087` (0x87C00000), or `05001C59` (0x591C0005, needs 64 MB DVMT).
 
+## Wi-Fi/Bluetooth coexistence boot loop (AirportItlwm / IntelBluetoothFirmware)
+After installing the BMI2-patched graphics drivers (see `tools/bmi2-patch/`)
+and removing `-igfxvesa` to test, a verbose (`-v`) boot never reached the
+desktop -- instead it sat scrolling the same block of text forever:
+```
+Setting BTCoex Profile: band:0
+Profile[0]: mode:7; desense:0; desense_level:0; chain_power_offset:0,0,0,0,
+...
+Setting BTCoex Config: enable_2G:1, profile_2g:0, enable_5G:1, profile_5G:0
+AppleKeyStore:7456:139: unexpected session: 100000 uid: -1 requested by: 139
+AppleKeyStore:11114:139: operation failed (sel: 7 ret: e00002c2, -1, 100000)
+Setting BTCoex Profile: band:0
+...
+```
+This is `AirportItlwm` programming Bluetooth/Wi-Fi coexistence profiles for
+the Intel AX200 combo card (see `setBTCOEX_PROFILES`/`setBTCOEX_CONFIG` in
+`OpenIntelWireless/itlwm`'s `AirportItlwm/AirportSTAIOCTL.cpp`), repeating
+over and over -- meaning that subsystem is crash-looping and
+re-initializing instead of settling down. The `AppleKeyStore` lines are
+normal pre-login keybag noise, not the cause.
+
+Critically, this happens **before** the kernel hands the display off to
+WindowServer -- while still showing scrolling verbose text, not a
+graphical boot screen -- so this is blocking boot earlier than, and
+independently of, the graphics driver patch. We had no way to tell from
+this whether the BMI2 patch itself was working.
+
+**Diagnostic step taken:** `AirportItlwm.kext`, `IntelBluetoothFirmware.kext`,
+and `BlueToolFixup.kext` are temporarily disabled (`Kernel > Add`) to get
+past this and confirm whether the graphics patch gets the system to the
+desktop at all, with Wi-Fi/Bluetooth as a known, separate, temporarily
+sacrificed feature. **Not yet confirmed working** -- if the system reaches
+the desktop with these disabled, re-enable them one at a time (Wi-Fi
+first, then Bluetooth) to isolate which one is actually looping, and
+report back. If it still doesn't reach the desktop even with all three
+disabled, the loop wasn't the (sole) blocker and something else is.
+
 ## Type Cover (keyboard/trackpad) and battery -- BigSurface failed to load
 A verbose boot log showed `BigSurface` failing to load entirely:
 ```

@@ -339,9 +339,9 @@
                     <key>BundlePath</key>
                     <string>AirportItlwm.kext</string>
                     <key>Comment</key>
-                    <string>V2.3.0 | AirportItlwm.kext</string>
+                    <string>V2.3.0 | AirportItlwm.kext -- temporarily disabled, see README "Wi-Fi/Bluetooth coexistence boot loop"</string>
                     <key>Enabled</key>
-                    <true/>
+                    <false/>
                     <key>ExecutablePath</key>
                     <string>Contents/MacOS/AirportItlwm</string>
                     <key>MaxKernel</key>
@@ -699,9 +699,9 @@
                     <key>BundlePath</key>
                     <string>IntelBluetoothFirmware.kext</string>
                     <key>Comment</key>
-                    <string>V2.4.0 | IntelBluetoothFirmware.kext</string>
+                    <string>V2.4.0 | IntelBluetoothFirmware.kext -- temporarily disabled, see README "Wi-Fi/Bluetooth coexistence boot loop"</string>
                     <key>Enabled</key>
-                    <true/>
+                    <false/>
                     <key>ExecutablePath</key>
                     <string>Contents/MacOS/IntelBluetoothFirmware</string>
                     <key>MaxKernel</key>
@@ -717,9 +717,9 @@
                     <key>BundlePath</key>
                     <string>BlueToolFixup.kext</string>
                     <key>Comment</key>
-                    <string>V2.7.1 | BlueToolFixup.kext</string>
+                    <string>V2.7.1 | BlueToolFixup.kext -- temporarily disabled, see README "Wi-Fi/Bluetooth coexistence boot loop"</string>
                     <key>Enabled</key>
-                    <true/>
+                    <false/>
                     <key>ExecutablePath</key>
                     <string>Contents/MacOS/BlueToolFixup</string>
                     <key>MaxKernel</key>
