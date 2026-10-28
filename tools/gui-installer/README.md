@@ -47,6 +47,18 @@ keeps the implementation to something verifiable by reading it.
    ```
    (Right-click the app > Show Package Contents works too, if you'd rather
    drag them in via Finder.)
+4. **Re-sign the app bundle now that you've modified its contents:**
+   ```
+   codesign --force --deep -s - "BMI2GraphicsPatchInstaller.app"
+   ```
+   `osacompile` ad-hoc signs the app when it builds it. Copying the two
+   driver files into `Contents/Resources/` afterward changes the bundle's
+   contents without updating that signature, so macOS's launch-time
+   validation rejects it with **"'BMI2GraphicsPatchInstaller.app' main
+   executable failed strict validation"** -- its signature no longer
+   matches what's actually in the bundle. Re-signing after adding the
+   resources (not before) fixes this. If you add/replace the resource
+   files again later, re-run this `codesign` command again afterward.
 
 ## Prerequisites (the app does NOT do these for you)
 
@@ -60,7 +72,12 @@ keeps the implementation to something verifiable by reading it.
 
 ## Running it
 
-Double-click `BMI2GraphicsPatchInstaller.app`. It will:
+Since it's only ad-hoc signed (not notarized by Apple), the first launch
+may still get a Gatekeeper "cannot be opened because it is from an
+unidentified developer" warning -- right-click (or Control-click) the app
+and choose **Open**, which only needs doing once.
+
+Then run it. It will:
 1. Check both patched files are present in its Resources folder.
 2. Show what it's about to do and ask for confirmation.
 3. Prompt for your admin password (standard macOS dialog).
