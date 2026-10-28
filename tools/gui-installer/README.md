@@ -9,11 +9,16 @@ Terminal needed to run it.
 
 **Status: built but not run on real hardware yet**, same as the patcher
 itself -- I have no macOS machine to test this on. The shell commands it
-runs are the exact ones from `tools/bmi2-patch/README.md`'s manual install
-steps, which are themselves modeled on OpenCore Legacy Patcher's proven
-`install_new_file()` / `fix_permissions()` pattern for this same class of
-driver bundle (see that README's "Installing" section). Please report back
-whether it works.
+runs are modeled on OpenCore Legacy Patcher's proven root-volume patching
+approach for this same class of driver bundle (`sys_patch/utilities/files.py`'s
+`install_new_file()` / `fix_permissions()`, and `sys_patch/mount/mount.py`'s
+`RootVolumeMount` for mounting the real system volume read-write). Please
+report back whether it works.
+
+An earlier version of this script wrote directly to `/System/Library/...`
+and failed with "Read-Only File System" -- fixed by mounting the real
+volume read-write first (see "Why it mounts..." below) instead of writing
+to the booted, sealed snapshot at `/`.
 
 ## Why AppleScript instead of a compiled app
 
@@ -59,24 +64,38 @@ Double-click `BMI2GraphicsPatchInstaller.app`. It will:
 1. Check both patched files are present in its Resources folder.
 2. Show what it's about to do and ask for confirmation.
 3. Prompt for your admin password (standard macOS dialog).
-4. Back up any existing files at the destination paths to
-   `/Library/Application Support/BMI2GraphicsPatch/backup-<timestamp>/`.
-5. Copy the two patched files into place (these paths currently only
+4. Mount the real system volume read-write at
+   `/System/Volumes/Update/mnt1` (skipped if already mounted there).
+5. Back up any existing files at the destination paths, under that mount,
+   to `/Library/Application Support/BMI2GraphicsPatch/backup-<timestamp>/`.
+6. Copy the two patched files into place there (these paths currently only
    contain `libigdmd.dylib` -- there is no existing main executable to
    overwrite, so this creates a new file; see the note in
    `tools/bmi2-patch/README.md` about why that's fine).
-6. `chmod 755` + `chown root:wheel` both files (matching OCLP's
+7. `chmod 755` + `chown root:wheel` both files (matching OCLP's
    `fix_permissions()`).
-7. Ad-hoc code-sign both (`codesign -f -s -`).
-8. Reseal the boot snapshot (`bless --mount / --create-snapshot`).
+8. Ad-hoc code-sign both (`codesign -f -s -`).
+9. Reseal the boot snapshot from that mount (`bless --folder
+   ".../System/Library/CoreServices" --bootefi --create-snapshot`).
+10. Unmount `/System/Volumes/Update/mnt1`.
 
 Then remove `-igfxvesa` from boot-args and reboot.
 
-If `bless --mount / --create-snapshot` fails on your macOS version, the
-OCLP-equivalent fallback is mounting the actual sealed system volume
-explicitly, typically `/System/Volumes/Update/mnt1`, and blessing that
-instead -- if the simple form above errors, say so and I'll adjust the
-script.
+### Why it mounts `/System/Volumes/Update/mnt1` instead of writing to `/`
+
+On Big Sur and newer (Monterey included), the booted `/System` is a sealed,
+read-only APFS snapshot. `csrutil disable` and `csrutil authenticated-root
+disable` only lift the *signature* checks on that content -- neither makes
+the booted snapshot itself writable. Writing straight to
+`/System/Library/...` fails with "Read-Only File System" even with both of
+those set (this is exactly what happened the first time this installer was
+run). The fix -- what OCLP's root-volume patcher does, see
+`sys_patch/mount/mount.py`'s `RootVolumeMount._mount_root_volume()` -- is to
+mount the real underlying volume read-write at a separate mountpoint,
+`/System/Volumes/Update/mnt1`, write the files there, then bless a new
+snapshot from that mount (`--folder .../CoreServices --bootefi
+--create-snapshot`, never `--mount /`). The installer now does this
+automatically; you don't need to do anything differently.
 
 ## Restoring the originals
 
@@ -86,13 +105,22 @@ The backup directory printed at the end of a successful install contains
 that path before -- on this system, where no file existed on disk only
 `libigdmd.dylib` did, there's nothing to restore to; just delete the
 patched file to go back to shared-cache-only). To restore an overwritten
-file:
+file, mount the real volume read-write the same way the installer does,
+then write to it (not to `/`):
 ```
-sudo cp "/Library/Application Support/BMI2GraphicsPatch/backup-<timestamp>/AppleIntelKBLGraphicsGLDriver.orig" \
-  /System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver
-sudo chmod 755 /System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver
-sudo chown root:wheel /System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver
-sudo codesign -f -s - /System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver
-sudo bless --mount / --create-snapshot
+sudo mkdir -p /System/Volumes/Update/mnt1
+ROOT_ID=$(diskutil info -plist / | /usr/libexec/PlistBuddy -c 'Print :DeviceIdentifier' /dev/stdin)
+# if `diskutil info -plist /` also prints APFSSnapshot = true, strip the
+# trailing 2 characters from $ROOT_ID first (e.g. disk1s1s1 -> disk1s1)
+sudo mount -o nobrowse -t apfs "/dev/$ROOT_ID" /System/Volumes/Update/mnt1
+
+DEST=/System/Volumes/Update/mnt1/System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver
+sudo cp "/Library/Application Support/BMI2GraphicsPatch/backup-<timestamp>/AppleIntelKBLGraphicsGLDriver.orig" "$DEST"
+sudo chmod 755 "$DEST"
+sudo chown root:wheel "$DEST"
+sudo codesign -f -s - "$DEST"
+sudo bless --folder /System/Volumes/Update/mnt1/System/Library/CoreServices --bootefi --create-snapshot
+sudo umount /System/Volumes/Update/mnt1
 ```
-(repeat for the MTL driver), then reboot.
+(repeat the `DEST=...` / `cp` / `chmod` / `chown` / `codesign` lines for
+the MTL driver before the `bless`/`umount` at the end), then reboot.

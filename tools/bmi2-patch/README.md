@@ -146,15 +146,29 @@ Manual steps:
    `csrutil authenticated-root disable` (needed since any modification
    to `/System` content breaks the sealed volume's snapshot hash tree).
 2. Reboot to the desktop (with `-igfxvesa` in boot-args so it actually
-   reaches one), copy the two patched files to these paths (the live
+   reaches one). The booted `/System` is a sealed, read-only APFS
+   snapshot -- `csrutil` settings only lift the signature checks, not the
+   read-only mount -- so mount the real volume read-write first:
+   ```
+   sudo mkdir -p /System/Volumes/Update/mnt1
+   diskutil info -plist / > /tmp/rootinfo.plist
+   ROOT_ID=$(/usr/libexec/PlistBuddy -c 'Print :DeviceIdentifier' /tmp/rootinfo.plist)
+   IS_SNAP=$(/usr/libexec/PlistBuddy -c 'Print :APFSSnapshot' /tmp/rootinfo.plist 2>/dev/null || echo false)
+   [ "$IS_SNAP" = "true" ] && ROOT_ID="${ROOT_ID%??}"
+   sudo mount -o nobrowse -t apfs "/dev/$ROOT_ID" /System/Volumes/Update/mnt1
+   ```
+   (this is the same approach OpenCore Legacy Patcher's root-volume
+   patcher uses, see `sys_patch/mount/mount.py`'s
+   `RootVolumeMount._mount_root_volume()`). Then copy the two patched
+   files to these paths **under that mount**, not under `/` (the live
    system has no existing main executable there -- only `libigdmd.dylib`
    is present, since Apple folds these into the dyld shared cache instead
    of shipping a loose on-disk copy -- so this creates a new file rather
-   than overwriting one; the same thing OpenCore Legacy Patcher does for
-   this same class of driver bundle, see its `install_new_file()` /
-   `fix_permissions()` in `sys_patch/utilities/files.py`):
-   - `.../AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver`
-   - `.../AppleIntelKBLGraphicsMTLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsMTLDriver`
+   than overwriting one; the same thing OCLP does for this same class of
+   driver bundle, see its `install_new_file()` / `fix_permissions()` in
+   `sys_patch/utilities/files.py`):
+   - `/System/Volumes/Update/mnt1/System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver`
+   - `/System/Volumes/Update/mnt1/System/Library/Extensions/AppleIntelKBLGraphicsMTLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsMTLDriver`
 
    Then explicitly fix ownership and permissions on both (a bare `cp`
    doesn't guarantee these; OCLP always does this after copying):
@@ -163,8 +177,10 @@ Manual steps:
    code signature -- the dyld shared cache is signed as one unit, not
    per-dylib -- so this adds a fresh one rather than replacing anything):
    `codesign -f -s - <path>` on each.
-4. Rebuild the sealed snapshot: `bless --mount / --create-snapshot` (if
-   that fails on your macOS version, mount the sealed system volume
-   explicitly, typically `/System/Volumes/Update/mnt1`, and bless that
-   instead).
+4. Rebuild the sealed snapshot from that mount, not from `/`:
+   `sudo bless --folder /System/Volumes/Update/mnt1/System/Library/CoreServices --bootefi --create-snapshot`,
+   then `sudo umount /System/Volumes/Update/mnt1`.
 5. Remove `-igfxvesa` from boot-args and reboot.
+
+(The GUI installer in `tools/gui-installer/` does all of step 2 onward for
+you, including the mount/unmount.)

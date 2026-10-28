@@ -8,12 +8,20 @@
 -- with osacompile (see tools/gui-installer/README.md), then drop the two
 -- patched files into the built app's Contents/Resources/ folder before
 -- running it. See that README for full build and prerequisite steps.
+--
+-- On Big Sur and newer, the booted /System is a sealed, read-only APFS
+-- snapshot -- csrutil disable / authenticated-root disable only lift the
+-- signature checks, not the read-only mount itself. So this script mounts
+-- the real underlying volume read-write at /System/Volumes/Update/mnt1
+-- (the same approach OpenCore Legacy Patcher's root-volume patcher uses),
+-- writes the patched files there, and blesses a fresh snapshot from that
+-- mount -- not from "/".
 
 property glDriverName : "AppleIntelKBLGraphicsGLDriver"
 property mtlDriverName : "AppleIntelKBLGraphicsMTLDriver"
 
-property glDestDir : "/System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS"
-property mtlDestDir : "/System/Library/Extensions/AppleIntelKBLGraphicsMTLDriver.bundle/Contents/MacOS"
+property glRelPath : "/System/Library/Extensions/AppleIntelKBLGraphicsGLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsGLDriver"
+property mtlRelPath : "/System/Library/Extensions/AppleIntelKBLGraphicsMTLDriver.bundle/Contents/MacOS/AppleIntelKBLGraphicsMTLDriver"
 
 on run
 	set resourcesPosix to my resourcesPath()
@@ -40,7 +48,7 @@ on run
 		"  1. Booted to Recovery and ran: csrutil disable" & return & ¬
 		"  2. Booted to Recovery and ran: csrutil authenticated-root disable" & return & ¬
 		"  3. Rebooted to the desktop (likely needs -igfxvesa in boot-args to get there)" & return & return & ¬
-		"The installer will back up any existing files, copy the patched ones in, fix ownership/permissions, ad-hoc code-sign them, and reseal the boot snapshot. You'll be asked for your admin password. A reboot is required afterward." & return & return & ¬
+		"The installer will mount the real system volume read-write, back up any existing files, copy the patched ones in, fix ownership/permissions, ad-hoc code-sign them, and reseal the boot snapshot. You'll be asked for your admin password. A reboot is required afterward." & return & return & ¬
 		"Continue?"
 
 	display dialog confirmMsg buttons {"Cancel", "Install"} default button 2 with icon caution
@@ -103,21 +111,40 @@ on twoDigit(n)
 end twoDigit
 
 on buildInstallScript(glSource, mtlSource, backupDir)
-	set glDest to glDestDir & "/" & glDriverName
-	set mtlDest to mtlDestDir & "/" & mtlDriverName
+	-- Everything below runs as root, via "do shell script ... with administrator
+	-- privileges". MOUNT is the real, writable root volume -- resolved and
+	-- mounted at /System/Volumes/Update/mnt1 if not already mounted there,
+	-- mirroring OpenCore Legacy Patcher's RootVolumeMount._mount_root_volume()
+	-- for Big Sur and newer. Destination paths are $MOUNT + the bundle path,
+	-- never a bare "/System/...", since the booted "/" is a read-only sealed
+	-- snapshot regardless of csrutil settings.
 
 	set scriptLines to {}
 	set end of scriptLines to "set -e"
+	set end of scriptLines to "MOUNT=/System/Volumes/Update/mnt1"
+	set end of scriptLines to "if [ ! -f \"$MOUNT/System/Library/CoreServices/SystemVersion.plist\" ]; then"
+	set end of scriptLines to "  mkdir -p \"$MOUNT\""
+	set end of scriptLines to "  /usr/sbin/diskutil info -plist / > /tmp/.bmi2_rootinfo.plist"
+	set end of scriptLines to "  ROOT_ID=$(/usr/libexec/PlistBuddy -c 'Print :DeviceIdentifier' /tmp/.bmi2_rootinfo.plist)"
+	set end of scriptLines to "  IS_SNAP=$(/usr/libexec/PlistBuddy -c 'Print :APFSSnapshot' /tmp/.bmi2_rootinfo.plist 2>/dev/null || echo false)"
+	set end of scriptLines to "  rm -f /tmp/.bmi2_rootinfo.plist"
+	set end of scriptLines to "  if [ \"$IS_SNAP\" = \"true\" ]; then ROOT_ID=\"${ROOT_ID%??}\"; fi"
+	set end of scriptLines to "  /sbin/mount -o nobrowse -t apfs \"/dev/$ROOT_ID\" \"$MOUNT\""
+	set end of scriptLines to "fi"
+	set end of scriptLines to "GLDEST=\"$MOUNT" & glRelPath & "\""
+	set end of scriptLines to "MTLDEST=\"$MOUNT" & mtlRelPath & "\""
 	set end of scriptLines to "mkdir -p " & quoted form of backupDir
-	set end of scriptLines to "if [ -f " & quoted form of glDest & " ]; then cp -p " & quoted form of glDest & " " & quoted form of (backupDir & "/" & glDriverName & ".orig") & "; fi"
-	set end of scriptLines to "if [ -f " & quoted form of mtlDest & " ]; then cp -p " & quoted form of mtlDest & " " & quoted form of (backupDir & "/" & mtlDriverName & ".orig") & "; fi"
-	set end of scriptLines to "cp " & quoted form of glSource & " " & quoted form of glDest
-	set end of scriptLines to "cp " & quoted form of mtlSource & " " & quoted form of mtlDest
-	set end of scriptLines to "chmod 755 " & quoted form of glDest & " " & quoted form of mtlDest
-	set end of scriptLines to "chown root:wheel " & quoted form of glDest & " " & quoted form of mtlDest
-	set end of scriptLines to "codesign -f -s - " & quoted form of glDest
-	set end of scriptLines to "codesign -f -s - " & quoted form of mtlDest
-	set end of scriptLines to "bless --mount / --create-snapshot"
+	set end of scriptLines to "if [ -f \"$GLDEST\" ]; then cp -p \"$GLDEST\" " & quoted form of (backupDir & "/" & glDriverName & ".orig") & "; fi"
+	set end of scriptLines to "if [ -f \"$MTLDEST\" ]; then cp -p \"$MTLDEST\" " & quoted form of (backupDir & "/" & mtlDriverName & ".orig") & "; fi"
+	set end of scriptLines to "cp " & quoted form of glSource & " \"$GLDEST\""
+	set end of scriptLines to "cp " & quoted form of mtlSource & " \"$MTLDEST\""
+	set end of scriptLines to "chmod 755 \"$GLDEST\" \"$MTLDEST\""
+	set end of scriptLines to "chown root:wheel \"$GLDEST\" \"$MTLDEST\""
+	set end of scriptLines to "codesign -f -s - \"$GLDEST\""
+	set end of scriptLines to "codesign -f -s - \"$MTLDEST\""
+	set end of scriptLines to "/usr/sbin/bless --folder \"$MOUNT/System/Library/CoreServices\" --bootefi --create-snapshot"
+	set end of scriptLines to "/sbin/umount \"$MOUNT\" || true"
+	set end of scriptLines to "echo 'Done.'"
 
 	set AppleScript's text item delimiters to linefeed
 	set joined to scriptLines as text
