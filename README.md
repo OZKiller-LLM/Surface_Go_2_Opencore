@@ -33,12 +33,49 @@ Acceleration depends on `DeviceProperties > Add > PciRoot(0x0)/Pci(0x2,0x0) > AA
 
 | Key | Type | Value |
 | --- | --- | --- |
-| AAPL,ig-platform-id | Data | `00001B59` (= 0x591B0000) |
-| framebuffer-patch-enable | Data | `01000000` |
-| framebuffer-stolenmem | Data | `00003001` |
-| framebuffer-fbmem | Data | `00009000` |
+| AAPL,ig-platform-id | Data | `00001659` (= 0x59160000) |
 
 Previously the value was `591B0000`, which is byte-reversed and reads as the invalid platform-id 0x00001B59. With that value the framebuffer never attaches, and macOS falls back to software rendering.
+
+**Update:** after fixing the byte order, boot still didn't reach the desktop
+(see `tools/bmi2-patch/`'s graphics-acceleration work and the "Wi-Fi/Bluetooth
+coexistence boot loop" section below for that saga). Diagnostics collected
+with `tools/gui-diagnostics/` once the Wi-Fi/BT loop was out of the way
+showed the *kernel's own* `AppleIntelKBLGraphicsFramebuffer` still failing:
+```
+(AppleIntelKBLGraphicsFramebuffer) PlatformID is undefined
+```
+and `ioreg` confirmed the device itself ended up with
+`"AAPL,ig-platform-id" = <ffffffff>` -- every other injected framebuffer
+property (`framebuffer-stolenmem`, `framebuffer-fbmem`,
+`framebuffer-patch-enable`) landed on the device correctly at the same
+`PciRoot(0x0)/Pci(0x2,0x0)` path, so DeviceProperties injection itself
+isn't the problem. `0x591B0000` is a real, documented Kaby Lake "laptop
+default" platform-id (see WhateverGreen's `FAQ.IntelHD.en.md`), but it
+appears to be keyed to hardware that actually reports device-id `0x591B` --
+this machine's real `device-id` (confirmed via `ioreg`) is `0x591C`, and the
+pairing didn't match anything in Apple's framebuffer kext's own table,
+hence "undefined".
+
+**Fix (not yet confirmed on hardware):** switched to `0x59160000` -- the
+platform-id Apple's own framebuffer kext falls back to by default when none
+is specified at all (per WhateverGreen's manual: "without AAPL,ig-platform-id
+the following ID is assumed: 59160000"), and one of the lowest-stolen-memory
+KBL entries (35 MB total), closest to what was already configured, so no
+DVMT firmware change should be needed. Dropped the `framebuffer-stolenmem`/
+`framebuffer-fbmem`/`framebuffer-patch-enable` overrides entirely, since
+those were tuned for `0x591B0000`'s needs (which wants a separate 21 MB
+`FBMEM` carve-out) and `0x59160000`'s table entry expects `FBMEM: 0 bytes`
+-- mixing the old overrides with the new platform-id risked a kernel panic
+per WhateverGreen's own warning about mismatched stolen-memory sizing.
+
+If `0x59160000` still doesn't attach a real display, the next candidates
+(in order of how closely their declared stolen-memory needs match what's
+currently configured, i.e. lowest risk first) are `0x87C00000` (35 MB,
+`framebuffer-fbmem` 0 bytes) and `0x591C0005` (58 MB total -- this one
+specifically corresponds to device-id `0x591C`, matching this hardware
+exactly, but needs DVMT pre-allocation raised to 64 MB in UEFI firmware
+setup first, or it risks a panic rather than just a blank screen).
 
 ## Secure Boot
 `Misc > Security > SecureBootModel` is set to `Disabled`. With `Default` and `ApECID` = `0`, OpenCore builds the Secure Boot identity from `SystemUUID`. When that is blank or zero, boot stops with `OCB: Grabbed zero system-id for SB, this is not allowed`.
