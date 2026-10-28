@@ -19,7 +19,24 @@ instruction and replace it with a short detour to an equivalent sequence
 built only from baseline (pre-BMI2) x86-64 instructions, which the 4425Y
 does support.
 
-## Status: patch built and verified against the real binaries -- not yet installed/booted
+## Status: patch built and verified against the real binaries -- `codesign` now accepted, boot not yet confirmed
+
+A first attempt at installing this on the Surface Go 2 failed at the
+`codesign -f -s -` step with **"main executable failed strict
+validation"** -- `codesign` itself refused to sign the patched file. Root
+cause: the patcher appended the new `__BMI2FIX` segment at the then-current
+end of the file, which placed it *after* `__LINKEDIT`. `codesign` requires
+`__LINKEDIT` to be the physically last thing in the file (it appends the
+signature directly after it), so a segment following it is rejected as a
+structurally malformed Mach-O. Fixed by relocating `__LINKEDIT` itself to
+after `__BMI2FIX` and shifting every load-command field that stores an
+absolute file offset into it (`LC_SYMTAB`, `LC_DYSYMTAB`, `LC_FUNCTION_STARTS`,
+`LC_DATA_IN_CODE`, and `LC_DYLD_INFO_ONLY`'s bind/weak_bind/lazy_bind/export
+offsets, for the MTL driver) by the same delta. Both files have been
+regenerated with this fix and re-verified (241/241 and 682/682 trampoline
+sites still bit-correct, 0 BMI2 instructions remaining in either). I still
+have no macOS machine to run `codesign` myself, so whether it now accepts
+the file is the next thing to confirm on real hardware.
 
 Both real driver binaries, extracted from the user's own Mac running
 Monterey 12.7.6, have been fully patched and verified:
@@ -84,6 +101,23 @@ hardware and is next.
 
 ## Bugs found and fixed along the way (most interesting first)
 
+- **`__BMI2FIX` landed after `__LINKEDIT`, which `codesign` rejects
+  outright.** Found only by actually trying to install on real hardware --
+  nothing in this project's own verification (Unicorn/Capstone-based, all
+  about instruction-level correctness) ever invoked `codesign`, so this
+  structural requirement was never checked until a real Mac's `codesign`
+  refused to sign the file with "main executable failed strict
+  validation". `codesign` requires `__LINKEDIT` to be the last segment in
+  the file, since it appends the signature blob directly after it; the
+  original patcher simply appended the new segment at end-of-file, which
+  (since `__LINKEDIT` was already there) put `__BMI2FIX` after it instead.
+  Fixed in `patch_macho.py` by cutting `__LINKEDIT`'s bytes off the end of
+  the file, appending `__BMI2FIX` where `__LINKEDIT` used to start, then
+  re-appending `__LINKEDIT`'s own bytes after that -- and shifting every
+  load command field holding an absolute file offset into `__LINKEDIT`
+  (`LC_SYMTAB` symoff/stroff, `LC_DYSYMTAB` indirectsymoff, `LC_FUNCTION_STARTS`/
+  `LC_DATA_IN_CODE` dataoff, `LC_DYLD_INFO_ONLY`'s bind/weak_bind/lazy_bind/
+  export offsets) by the same delta its segment command gets.
 - **`_riprel_wrapper`'s register exclusion missed `bzhi`'s `idx` entirely.**
   The one RIP-relative site in the whole project is a `bzhi` with
   `idx=rax`. The wrapper that loads a RIP-relative operand's resolved

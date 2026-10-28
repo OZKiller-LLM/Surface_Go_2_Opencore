@@ -106,6 +106,66 @@ def build_trampoline_asm(site):
 
 
 # ---------------------------------------------------------------------------
+# Load commands whose fields are absolute file offsets into __LINKEDIT.
+# When __LINKEDIT is relocated, every one of these must be shifted by the
+# same delta, or they point at garbage (or, worse, at bytes that happen to
+# decode as something else) in the moved file.
+# ---------------------------------------------------------------------------
+LC_SYMTAB = 0x2
+LC_DYSYMTAB = 0xb
+LC_FUNCTION_STARTS = 0x26
+LC_DATA_IN_CODE = 0x29
+LC_SEGMENT_SPLIT_INFO = 0x1e
+LC_DYLIB_CODE_SIGN_DRS = 0x2b
+LC_DYLD_EXPORTS_TRIE = 0x80000033
+LC_DYLD_CHAINED_FIXUPS = 0x80000034
+LC_DYLD_INFO = 0x22
+LC_DYLD_INFO_ONLY = 0x80000022
+# linkedit_data_command shape: cmd, cmdsize, dataoff, datasize
+_LINKEDIT_DATA_CMDS = {
+    LC_FUNCTION_STARTS, LC_DATA_IN_CODE, LC_SEGMENT_SPLIT_INFO,
+    LC_DYLIB_CODE_SIGN_DRS, LC_DYLD_EXPORTS_TRIE, LC_DYLD_CHAINED_FIXUPS,
+}
+
+
+def _walk_commands(data, ncmds, header_size):
+    """Yields (offset, cmd, cmdsize) for every load command."""
+    off = header_size
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, off)
+        yield off, cmd, cmdsize
+        off += cmdsize
+
+
+def _shift_linkedit_offset_fields(data, ncmds, header_size, delta):
+    """Shifts every load-command field holding an absolute file offset into
+    __LINKEDIT by `delta`, matching __LINKEDIT's own relocation. A 0 value
+    in one of these fields conventionally means "not present" and must stay
+    0, never gain delta."""
+    def bump(offset):
+        (val,) = struct.unpack_from("<I", data, offset)
+        if val != 0:
+            struct.pack_into("<I", data, offset, val + delta)
+
+    for off, cmd, cmdsize in list(_walk_commands(data, ncmds, header_size)):
+        if cmd == LC_SYMTAB:
+            bump(off + 8)   # symoff
+            bump(off + 16)  # stroff
+        elif cmd == LC_DYSYMTAB:
+            for field_off in (32, 40, 48, 56, 64, 72):
+                # tocoff, modtaboff, extrefsymoff, indirectsymoff,
+                # extreloff, locreloff
+                bump(off + field_off)
+        elif cmd in _LINKEDIT_DATA_CMDS:
+            bump(off + 8)   # dataoff
+        elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
+            for field_off in (8, 16, 24, 32, 40):
+                # rebase_off, bind_off, weak_bind_off, lazy_bind_off,
+                # export_off
+                bump(off + field_off)
+
+
+# ---------------------------------------------------------------------------
 # Patch driver
 # ---------------------------------------------------------------------------
 def patch_file(in_path, out_path, verbose=True):
@@ -132,6 +192,29 @@ def patch_file(in_path, out_path, verbose=True):
             f"existing file content, which this patcher deliberately does "
             f"not attempt"
         )
+
+    # __LINKEDIT must end up the LAST thing in the file: codesign's own
+    # structural ("strict") validation of a Mach-O requires nothing to
+    # follow it, since it appends the code signature directly after
+    # __LINKEDIT's content. The straightforward approach -- append the new
+    # __BMI2FIX segment at the then-current end of file -- places it AFTER
+    # __LINKEDIT instead, which codesign rejects outright with "main
+    # executable failed strict validation" (confirmed against the real
+    # patched files on real hardware: codesign ran, but refused to sign).
+    # Fix: cut __LINKEDIT off the end, append __BMI2FIX where __LINKEDIT
+    # used to start, then re-append __LINKEDIT's own bytes after that --
+    # shifting every load-command field that stores an absolute file
+    # offset into __LINKEDIT by the same delta its segment command gets.
+    linkedit = next(seg for seg in segments if seg["segname"] == "__LINKEDIT")
+    old_linkedit_fileoff = linkedit["fileoff"]
+    linkedit_filesize = linkedit["filesize"]
+    assert old_linkedit_fileoff + linkedit_filesize == len(data), (
+        "__LINKEDIT is not the last thing in the input file -- this "
+        "patcher assumes it is (true for both real driver binaries) and "
+        "would need a different relocation strategy otherwise"
+    )
+    linkedit_bytes = bytes(data[old_linkedit_fileoff:old_linkedit_fileoff + linkedit_filesize])
+    del data[old_linkedit_fileoff:]
 
     max_vm_end = max(seg["vmaddr"] + seg["vmsize"] for seg in segments)
     new_vmaddr = page_align(max_vm_end)
@@ -181,6 +264,20 @@ def patch_file(in_path, out_path, verbose=True):
     data += tramp_bytes
     new_filesize = len(tramp_bytes)
 
+    # --- re-append __LINKEDIT after __BMI2FIX, now the true end of file,
+    # and shift every load command field that points into it ---
+    new_linkedit_fileoff = page_align(len(data))
+    if len(data) < new_linkedit_fileoff:
+        data += b"\x00" * (new_linkedit_fileoff - len(data))
+    data += linkedit_bytes
+    linkedit_delta = new_linkedit_fileoff - old_linkedit_fileoff
+    struct.pack_into("<Q", data, linkedit["cmd_offset"] + 40, new_linkedit_fileoff)
+    _shift_linkedit_offset_fields(data, ncmds, header_size, linkedit_delta)
+
+    if verbose:
+        print(f"  __LINKEDIT moved: fileoff 0x{old_linkedit_fileoff:x} -> "
+              f"0x{new_linkedit_fileoff:x} (delta +0x{linkedit_delta:x})")
+
     # --- insert the new LC_SEGMENT_64 (+ one section) into header slack ---
     segname_b = NEW_SEGNAME.encode().ljust(16, b"\x00")
     sectname_b = NEW_SECTNAME.encode().ljust(16, b"\x00")
@@ -226,6 +323,11 @@ def patch_file(in_path, out_path, verbose=True):
     data[cmds_end:cmds_end + len(new_cmd)] = new_cmd
     struct.pack_into("<I", data, 16, ncmds + 1)          # ncmds
     struct.pack_into("<I", data, 20, sizeofcmds + len(new_cmd))  # sizeofcmds
+
+    assert new_linkedit_fileoff + linkedit_filesize == len(data), (
+        "__LINKEDIT is not the last thing in the output file -- codesign "
+        "would reject this the same way it rejected the first version"
+    )
 
     with open(out_path, "wb") as f:
         f.write(data)
