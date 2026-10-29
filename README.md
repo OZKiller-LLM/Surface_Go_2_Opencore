@@ -77,6 +77,40 @@ specifically corresponds to device-id `0x591C`, matching this hardware
 exactly, but needs DVMT pre-allocation raised to 64 MB in UEFI firmware
 setup first, or it risks a panic rather than just a blank screen).
 
+**Confirmed working** -- `0x59160000` fixed the kernel-level framebuffer:
+the boot logo is no longer discolored (previously red/green-corrupted),
+confirming a real display now attaches correctly. Boot still doesn't
+reach the desktop, but for an unrelated reason -- see "CPU power-management
+ACPI hang" below.
+
+## CPU power-management ACPI hang
+With the Type Cover detached (see "Wi-Fi/Bluetooth coexistence boot loop"
+below -- a *different*, already-resolved hang) and the platform-id fixed,
+boot progresses much further, through USB enumeration, kext collection
+loading, and WhateverGreen/Lilu's igfx patches, then stops dead partway
+through a dynamically-loaded ACPI table:
+```
+ACPI: Dynamic OEM Table Load:
+ACPI: SSDT @0xFFFFFF9518CCF698 0003FF (v02 PmRef  CpuOCst  00003001 INTL 20160527)
+ACPI: Executed 1 blocks of module-level executable AML code
+ACPI: Dynami[cut off here]
+```
+Adding `-v keepsyms=1 debug=0x100` to boot-args (to force any real crash to
+surface a full panic/backtrace instead of silently resetting) did **not**
+produce a panic -- the system just stays frozen at this exact text,
+confirming a genuine deadlock in the kernel's ACPI AML interpreter while
+executing a CPU power-management table (`PmRef CpuOCst`), not a crash.
+
+This is unrelated to graphics. `CPUFriend.kext`/`CPUFriendDataProvider.kext`
+(which inject a custom CPU power-management table to make XCPM behave for
+this non-genuine CPU) are the most directly related kexts to what's
+visibly hanging, so both are **temporarily disabled** as the next
+diagnostic step. Note: disabling CPUFriend alone did *not* fix an earlier,
+different pre-boot hang (see "CPUID spoof is required" below) -- but that
+was before the CPUID spoof existed and happened much earlier in boot, so
+it doesn't rule CPUFriend out for this new, later hang. Not yet confirmed
+either way.
+
 ## Secure Boot
 `Misc > Security > SecureBootModel` is set to `Disabled`. With `Default` and `ApECID` = `0`, OpenCore builds the Secure Boot identity from `SystemUUID`. When that is blank or zero, boot stops with `OCB: Grabbed zero system-id for SB, this is not allowed`.
 

@@ -621,9 +621,9 @@
                     <key>BundlePath</key>
                     <string>CPUFriend.kext</string>
                     <key>Comment</key>
-                    <string>V1.3.0 | CPUFriend.kext</string>
+                    <string>V1.3.0 | CPUFriend.kext -- temporarily disabled, see README "CPU power-management ACPI hang"</string>
                     <key>Enabled</key>
-                    <true/>
+                    <false/>
                     <key>ExecutablePath</key>
                     <string>Contents/MacOS/CPUFriend</string>
                     <key>MaxKernel</key>
@@ -639,9 +639,9 @@
                     <key>BundlePath</key>
                     <string>CPUFriendDataProvider.kext</string>
                     <key>Comment</key>
-                    <string>V1.0.1 | CPUFriendDataProvider.kext</string>
+                    <string>V1.0.1 | CPUFriendDataProvider.kext -- temporarily disabled, see README "CPU power-management ACPI hang"</string>
                     <key>Enabled</key>
-                    <true/>
+                    <false/>
                     <key>ExecutablePath</key>
                     <string></string>
                     <key>MaxKernel</key>
