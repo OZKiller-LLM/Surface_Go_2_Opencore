@@ -111,6 +111,44 @@ was before the CPUID spoof existed and happened much earlier in boot, so
 it doesn't rule CPUFriend out for this new, later hang. Not yet confirmed
 either way.
 
+**Update:** with CPUFriend disabled, boot got past that *specific*
+`PmRef CpuOCst` table -- but then hit two more hangs in sequence, each
+clearing only when something about the attached USB devices changed:
+
+1. With the Type Cover attached: a `DK: AppleUserUSBHostHIDDevice-...
+   waiting for server com.apple.driverkit.AppleUserHIDDrivers-...` hang
+   (see "Wi-Fi/Bluetooth coexistence boot loop" below for the unrelated,
+   earlier hang that section is actually about -- this is a *different*
+   stall, for a USB HID DriverKit server, not Wi-Fi/BT). Detaching the
+   Type Cover got past it.
+2. With *all* external USB devices (keyboard, mouse, flash drive)
+   unplugged, that same `DK: ... waiting for server` stall didn't recur at
+   all -- pointing at `USBInjectAll.kext`'s generic ("inject every
+   possible port") USB port map as the likely cause: DriverKit's HID
+   device matching seems to stall on at least some of those generically
+   injected ports, regardless of which physical device is attached to
+   them. A proper port map specific to this board (e.g. built with
+   USBToolBox) would be the real fix; not yet done.
+3. But with no USB devices attached, boot then hit *another* dynamic
+   `ACPI: Dynamic OEM Table Load:` hang -- this time with no table name
+   even printed before it froze, so a different instance than
+   `PmRef CpuOCst`. **CPUFriend was already disabled** at this point,
+   confirming CPUFriend wasn't the true root cause of the ACPI hang
+   category -- disabling it (and separately, removing the Type Cover)
+   most likely just changed device-enumeration timing enough to dodge
+   that one specific earlier occurrence. This looks timing-sensitive
+   rather than cleanly attributable to one kext.
+
+None of this repo's own SSDTs (`SSDT-EC-USBX-LAPTOP`, `SSDT-PNLF`,
+`SSDT-SURFACE`, `SSDT-XOSI`) are CPU-power-related by name, so the
+dynamically-loaded table is coming from the Surface Go 2's own firmware
+ACPI tables, not anything injected here -- likely triggered by the
+kernel's legacy ACPI power-management path (active because
+`DummyPowerManagement = true` already routes around XCPM). Added
+`acpi_layer=0xffffffff acpi_level=0xffffffff` to boot-args to get full
+ACPI method-level tracing, since without it we don't even get a table
+name to go on. Not yet run with this boot-arg.
+
 ## Secure Boot
 `Misc > Security > SecureBootModel` is set to `Disabled`. With `Default` and `ApECID` = `0`, OpenCore builds the Secure Boot identity from `SystemUUID`. When that is blank or zero, boot stops with `OCB: Grabbed zero system-id for SB, this is not allowed`.
 
