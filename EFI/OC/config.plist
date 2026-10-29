@@ -1211,7 +1211,7 @@
                 <key>LogModules</key>
                 <string>*</string>
                 <key>SysReport</key>
-                <false/>
+                <true/>
                 <key>Target</key>
                 <integer>3</integer>
             </dict>
@@ -1656,7 +1656,7 @@
                     <key>SystemAudioVolume</key>
                     <data>Rg==</data>
                     <key>boot-args</key>
-                    <string>keepsyms=1 debug=0x100 amfi=0x80 -igfxbls -v acpi_layer=0xffffffff acpi_level=0xffffffff</string>
+                    <string>keepsyms=1 debug=0x100 amfi=0x80 -igfxbls -v</string>
                     <key>csr-active-config</key>
                     <data>AAAAAA==</data>
                     <key>prev-lang:kbd</key>
