@@ -176,6 +176,37 @@ find the actual AML method performing the dynamic `Load()` and write a
 precise SSDT patch for it, instead of guessing through boot-arg
 combinations that risk further crashes.
 
+**Root cause found** from the `SysReport` ACPI table dump. `SSDT-11.aml`
+(OEM ID `MSFT` -- Microsoft's own table, not a typical OEM BIOS vendor's)
+contains a table of seven CPU power-management sub-tables
+(`CPU0IST`/`APIST`/`CPU0CST`/`APCST`/`CPU0HWP`/`APHWP`/`HWPLVT`), each
+given as a **raw physical memory address and length** rather than a
+normal ACPI table -- e.g. `"CPU0CST ", 0x8C6A8898, 0x000003FF`. At
+runtime, for each CPU core, it does:
+```
+OperationRegion (CST0, SystemMemory, DerefOf (SSDT[0x07]), DerefOf (SSDT[0x08]))
+Load (CST0, HC0)
+```
+i.e. it reads whatever bytes currently sit at that fixed physical address
+and loads them as an ACPI table. The length in that `Load` (`0x3FF`)
+matches the panic log's `SSDT @... 0003FF` exactly, confirming this is
+the table that hangs.
+
+This is fragile under OpenCore/XNU: if that physical memory region isn't
+explicitly protected, nothing stops the kernel from allocating over it
+for something else *before* this method runs later in boot -- at which
+point `Load()` reads corrupted garbage instead of the real table, which
+plausibly explains both the silent hang and the ACPI debug-print
+infinite loop (formatting garbage data from a corrupted table).
+
+**Fix:** enabled `Booter > Quirks > RebuildAppleMemoryMap` and
+`ProtectMemoryRegions` (both `false` before, now `true` -- general
+memory-map compatibility quirks aimed at exactly this class of
+non-Apple-firmware issue), and added an explicit `UEFI > ReservedMemory`
+entry covering `0x8C6A6000`-`0x8C6AA000` (page-aligned to span all seven
+sub-tables), so macOS is told never to reuse that range. Not yet
+confirmed on hardware.
+
 ## Secure Boot
 `Misc > Security > SecureBootModel` is set to `Disabled`. With `Default` and `ApECID` = `0`, OpenCore builds the Secure Boot identity from `SystemUUID`. When that is blank or zero, boot stops with `OCB: Grabbed zero system-id for SB, this is not allowed`.
 

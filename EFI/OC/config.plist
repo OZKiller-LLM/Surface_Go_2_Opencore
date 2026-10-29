@@ -284,7 +284,7 @@
                 <key>ForceExitBootServices</key>
                 <false/>
                 <key>ProtectMemoryRegions</key>
-                <false/>
+                <true/>
                 <key>ProtectSecureBoot</key>
                 <false/>
                 <key>ProtectUefiServices</key>
@@ -294,7 +294,7 @@
                 <key>ProvideMaxSlide</key>
                 <integer>0</integer>
                 <key>RebuildAppleMemoryMap</key>
-                <false/>
+                <true/>
                 <key>ResizeAppleGpuBars</key>
                 <integer>-1</integer>
                 <key>SetupVirtualMap</key>
@@ -2040,6 +2040,18 @@
             </dict>
             <key>ReservedMemory</key>
             <array>
+                <dict>
+                    <key>Address</key>
+                    <integer>2355781632</integer>
+                    <key>Comment</key>
+                    <string>Microsoft SSDT-11's dynamically-loaded CPU power tables (CPU0IST/APIST/CPU0CST/APCST/CPU0HWP/APHWP/HWPLVT, 0x8C6A6018-0x8C6A985F) -- protect from reuse so Load() doesn't read corrupted memory, see README "CPU power-management ACPI hang"</string>
+                    <key>Enabled</key>
+                    <true/>
+                    <key>Size</key>
+                    <integer>16384</integer>
+                    <key>Type</key>
+                    <string>Reserved</string>
+                </dict>
                 <dict>
                     <key>Address</key>
                     <integer>268435456</integer>
